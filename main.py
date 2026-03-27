@@ -14,8 +14,8 @@ from aiogram.types import Message
 from playwright.async_api import async_playwright
 
 # ========== КОНФИГ ==========
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-DEEPSEEK_CHAT_URL = os.getenv("DEEPSEEK_URL")
+TOKEN = os.getenv("8341114630:AAGVtbQ47T9HX1YqKJ91t5xUU8ukkS6m_F8")
+DEEPSEEK_CHAT_URL = os.getenv("https://chat.deepseek.com/a/chat/s/61257496-cd26-4d3c-a387-79772ad68596")
 BOT_NAME = os.getenv("BOT_NAME", "Джонни")
 LOG_FILE = os.getenv("LOG_FILE", "dialogues.json")
 
