@@ -1,5 +1,6 @@
 """
-Telegram бот Джонни — вежливый, грамотный, но живой
+Telegram бот Джонни — использует DeepSeek через Playwright
+С сохранением cookies, обычный запуск (не persistent context)
 """
 
 import asyncio
@@ -14,24 +15,19 @@ from aiogram.types import Message
 from playwright.async_api import async_playwright
 
 # ========== КОНФИГ ==========
-TOKEN = os.getenv("8341114630:AAGVtbQ47T9HX1YqKJ91t5xUU8ukkS6m_F8")
-DEEPSEEK_CHAT_URL = os.getenv("https://chat.deepseek.com/a/chat/s/61257496-cd26-4d3c-a387-79772ad68596")
-BOT_NAME = os.getenv("BOT_NAME", "Джонни")
-LOG_FILE = os.getenv("LOG_FILE", "dialogues.json")
+TOKEN = "8341114630:AAGVtbQ47T9HX1YqKJ91t5xUU8ukkS6m_F8"
+DEEPSEEK_CHAT_URL = "https://chat.deepseek.com/a/chat/s/61257496-cd26-4d3c-a387-79772ad68596"
+BOT_NAME = "Джонни"
+LOG_FILE = "dialogues.json"
+COOKIES_FILE = "deepseek_cookies.json"  # файл для сохранения cookies
 
-if not TOKEN:
-    raise ValueError("TELEGRAM_TOKEN не установлен!")
-if not DEEPSEEK_CHAT_URL:
-    raise ValueError("DEEPSEEK_URL не установлен!")
-
-# ========== НАСТРОЙКИ ПОВЕДЕНИЯ ==========
+# ========== НАСТРОЙКИ ==========
 MIN_TYPING_DELAY = 3
 MAX_TYPING_DELAY = 8
-EMOJI_CHANCE = 0.25  # 25% шанс добавить эмодзи
+EMOJI_CHANCE = 0.25
 ANTI_SPAM_WINDOW = 10
 MAX_MESSAGES_IN_WINDOW = 3
 
-# Вежливые эмодзи
 EMOJIS = ["😊", "👍", "😄", "👌", "🔥", "🤝", "✨", "🙂"]
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
@@ -39,6 +35,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 browser = None
+context = None
 page = None
 playwright_instance = None
 deepseek_ready = False
@@ -50,9 +47,7 @@ user_message_count = {}
 # ========== ФУНКЦИИ ==========
 
 def get_typing_delay(user_id: int) -> float:
-    """Задержка перед ответом (человеческая)"""
     base_delay = random.uniform(MIN_TYPING_DELAY, MAX_TYPING_DELAY)
-    # Если флудит — отвечаем чуть медленнее
     if user_id in user_message_count:
         if user_message_count[user_id] > MAX_MESSAGES_IN_WINDOW:
             base_delay += random.uniform(1, 3)
@@ -60,7 +55,6 @@ def get_typing_delay(user_id: int) -> float:
 
 
 def add_gentle_emoji(text: str) -> str:
-    """Иногда добавляет вежливое эмодзи в конец"""
     if random.random() > EMOJI_CHANCE:
         return text
     emoji = random.choice(EMOJIS)
@@ -71,7 +65,6 @@ def add_gentle_emoji(text: str) -> str:
 
 
 def update_spam_tracking(user_id: int):
-    """Отслеживает частоту сообщений"""
     current_time = time.time()
     if user_id not in user_last_message_time:
         user_last_message_time[user_id] = current_time
@@ -85,48 +78,136 @@ def update_spam_tracking(user_id: int):
     user_last_message_time[user_id] = current_time
 
 
+async def save_cookies():
+    """Сохраняет cookies в файл"""
+    global context
+    try:
+        if context:
+            cookies = await context.cookies()
+            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                json.dump(cookies, f, ensure_ascii=False, indent=2)
+            print(f"🍪 Cookies сохранены в {COOKIES_FILE}")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения cookies: {e}")
+
+
+async def load_cookies():
+    """Загружает cookies из файла в контекст"""
+    global context
+    if not os.path.exists(COOKIES_FILE):
+        print("📭 Файл с cookies не найден, потребуется вход вручную")
+        return False
+
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+        await context.add_cookies(cookies)
+        print(f"🍪 Cookies загружены из {COOKIES_FILE}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка загрузки cookies: {e}")
+        return False
+
+
 async def init_browser():
-    """Запускает браузер"""
-    global browser, page, playwright_instance, deepseek_ready
+    """Запускает браузер, загружает cookies, открывает DeepSeek"""
+    global browser, context, page, playwright_instance, deepseek_ready
+
     print("🚀 Запуск браузера...")
     playwright_instance = await async_playwright().start()
-    browser = await playwright_instance.chromium.launch(headless=True)
-    page = await browser.new_page()
-    print(f"🌐 Открываю DeepSeek...")
+
+    # Обычный запуск (не persistent)
+    browser = await playwright_instance.chromium.launch(headless=False)
+
+    # Создаем контекст (как раньше)
+    context = await browser.new_context()
+
+    # Пробуем загрузить сохраненные cookies
+    await load_cookies()
+
+    # Создаем страницу
+    page = await context.new_page()
+
+    print(f"🌐 Открываю DeepSeek: {DEEPSEEK_CHAT_URL}")
     await page.goto(DEEPSEEK_CHAT_URL)
+
+    # Ждем загрузки страницы
+    print("⏳ Жду загрузки страницы...")
     await page.wait_for_timeout(5000)
-    print("✅ Браузер готов")
-    deepseek_ready = True
+
+    # Проверяем, есть ли поле ввода
+    try:
+        input_box = await page.wait_for_selector('textarea, div[contenteditable="true"]', timeout=10000)
+        print("✅ Поле ввода найдено! Бот готов к работе.")
+        deepseek_ready = True
+        return
+    except:
+        print("⚠️ Поле ввода не найдено. Возможно, нужно войти в аккаунт.")
+        print("👉 Войди в DeepSeek в открывшемся окне браузера")
+        print("👉 После входа нажми Enter в консоли")
+
+        input("Нажми Enter после входа в аккаунт...")
+
+        # Проверяем еще раз
+        try:
+            input_box = await page.wait_for_selector('textarea, div[contenteditable="true"]', timeout=10000)
+            print("✅ Поле ввода найдено! Сохраняю сессию...")
+
+            # Сохраняем cookies после успешного входа
+            await save_cookies()
+            print("🍪 Cookies сохранены. При следующем запуске вход не потребуется.")
+
+            deepseek_ready = True
+        except:
+            print("❌ Не удалось найти поле ввода. Проверь, что ты вошел в аккаунт.")
+            deepseek_ready = False
 
 
 async def send_to_deepseek(message: str) -> str:
-    """Отправляет сообщение в DeepSeek"""
+    """Отправляет сообщение в DeepSeek и возвращает ответ"""
     global page
-    try:
-        input_box = await page.wait_for_selector('textarea, div[contenteditable="true"]', timeout=5000)
-        await input_box.fill('')
-        await input_box.fill(message)
-        await input_box.press('Enter')
-        await page.wait_for_timeout(3000)
 
-        assistant_msg = await page.query_selector('[data-message-author-role="assistant"], .assistant-message')
+    if not page:
+        return "Ошибка: страница не инициализирована"
+
+    try:
+        # Ищем поле ввода
+        input_box = await page.wait_for_selector('textarea, div[contenteditable="true"]', timeout=30000)
+
+        # Очищаем и вводим сообщение
+        await input_box.click()
+        await input_box.fill('')
+        await asyncio.sleep(0.3)
+        await input_box.fill(message)
+
+        # Отправляем (Enter)
+        await input_box.press('Enter')
+        print(f"📤 Отправлено: {message[:50]}..." if len(message) > 50 else f"📤 Отправлено: {message}")
+
+        # Ждем ответа
+        await page.wait_for_timeout(8000)
+
+        # Пытаемся найти ответ ассистента
+        assistant_msg = await page.query_selector(
+            '[data-message-author-role="assistant"], .assistant-message, [class*="assistant"]')
         if not assistant_msg:
             messages = await page.query_selector_all('[class*="message"]')
             if messages:
                 last = messages[-1]
                 text = await last.inner_text()
                 return text.strip()
-            return "Не удалось получить ответ."
+            return "Не удалось получить ответ от DeepSeek."
 
         text = await assistant_msg.inner_text()
+        print(f"📥 Получен ответ: {text[:50]}..." if len(text) > 50 else f"📥 Получен ответ: {text}")
         return text.strip()
+
     except Exception as e:
-        print(f"❌ Ошибка DeepSeek: {e}")
+        print(f"❌ Ошибка при отправке в DeepSeek: {e}")
         return "Не получилось отправить, попробуй еще раз."
 
 
 def log_dialogue(user_id, username, user_message, bot_response, delay):
-    """Сохраняет диалог в лог"""
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             logs = json.load(f)
@@ -155,51 +236,41 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message):
-    """Сбрасывает контекст диалога"""
     global page
     try:
         new_chat = await page.query_selector('button:has-text("Новый чат")')
         if new_chat:
             await new_chat.click()
-            await message.answer("🔄 Диалог сброшен. Начинаем заново.")
+            await message.answer("🔄 Диалог сброшен.")
         else:
-            await message.answer("Не нашел кнопку сброса, попробуй обновить страницу вручную.")
+            await message.answer("Не нашел кнопку сброса.")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
 
 @dp.message(F.text)
 async def handle_message(message: Message):
-    """Обрабатывает текстовые сообщения"""
     global deepseek_ready
 
     if not deepseek_ready:
-        await message.answer("⏳ Бот загружается, подожди немного...")
+        await message.answer("⏳ Бот загружается, подожди...")
         return
 
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
     user_text = message.text
 
-    # Антиспам
     update_spam_tracking(user_id)
 
-    # Задержка "печатания"
     delay = get_typing_delay(user_id)
     await bot.send_chat_action(user_id, "typing")
     await asyncio.sleep(delay)
 
     try:
-        # Получаем ответ от DeepSeek
         response = await send_to_deepseek(user_text)
-
-        # Добавляем эмодзи (иногда)
         response = add_gentle_emoji(response)
-
-        # Логируем
         log_dialogue(user_id, username, user_text, response, delay)
 
-        # Отправляем ответ (с разбивкой если длинный)
         if len(response) > 4096:
             for i in range(0, len(response), 4000):
                 await message.answer(response[i:i + 4000])
@@ -213,14 +284,20 @@ async def handle_message(message: Message):
 
 @dp.message()
 async def handle_unknown(message: Message):
-    await message.answer("Напиши текстовое сообщение, я отвечу 😊")
+    await message.answer("Напиши текстовое сообщение 😊")
 
 
 # ========== ЗАПУСК ==========
 
 async def main():
-    print(f"🤖 Запуск {BOT_NAME}...")
+    print(f"🤖 Запуск бота {BOT_NAME}...")
     await init_browser()
+
+    if deepseek_ready:
+        print("✅ Бот готов к работе!")
+    else:
+        print("⚠️ Бот запущен, но DeepSeek не готов. Проверь браузер.")
+
     await dp.start_polling(bot)
 
 
